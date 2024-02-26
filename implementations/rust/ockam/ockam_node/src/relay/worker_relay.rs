@@ -111,6 +111,8 @@ where
                     self.ctx.address(),
                     e
                 );
+                self.shutdown_and_stop_ack().await;
+                return;
             }
         }
 
@@ -167,6 +169,10 @@ where
             }
         }
 
+        self.shutdown_and_stop_ack().await;
+    }
+
+    async fn shutdown_and_stop_ack(&mut self) {
         // Run the shutdown hook for this worker
         match self.worker.shutdown(&mut self.ctx).await {
             Ok(()) => {}
