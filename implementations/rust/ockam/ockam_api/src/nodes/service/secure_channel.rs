@@ -207,7 +207,7 @@ impl NodeManager {
             None => options,
         };
 
-        let options = match self.credential_retriever_creator.as_ref() {
+        let options = match self.credential_retriever_creators.project_member.as_ref() {
             None => options,
             Some(credential_retriever_creator) => {
                 options.with_credential_retriever_creator(credential_retriever_creator.clone())?
@@ -315,7 +315,7 @@ impl NodeManager {
             None => options,
         };
 
-        let options = match self.credential_retriever_creator.as_ref() {
+        let options = match self.credential_retriever_creators.project_member.as_ref() {
             None => options,
             Some(credential_retriever_creator) => {
                 options.with_credential_retriever_creator(credential_retriever_creator.clone())?

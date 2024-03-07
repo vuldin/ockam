@@ -100,6 +100,7 @@ impl StoreCommand {
                 .put(
                     &subject,
                     &purpose_key_data.subject,
+                    "test", // FIXME LATER CRED,
                     credential_data.expires_at,
                     credential.clone(),
                 )

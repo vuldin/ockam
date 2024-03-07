@@ -1,5 +1,7 @@
+use crate::cloud::project::Project;
 use crate::nodes::service::{NodeManagerCredentialRetrieverOptions, NodeManagerTrustOptions};
-use crate::{multiaddr_to_transport_route, CliState, DefaultAddress};
+use crate::nodes::NodeManager;
+use crate::{multiaddr_to_transport_route, CliState};
 use ockam::identity::{IdentitiesVerification, RemoteCredentialRetrieverInfo};
 use ockam_core::errcode::{Kind, Origin};
 use ockam_core::{Error, Result};
@@ -7,6 +9,156 @@ use ockam_multiaddr::MultiAddr;
 use ockam_vault::SoftwareVaultForVerifyingSignatures;
 
 impl CliState {
+    async fn retrieve_trust_options_explicit_project_authority(
+        &self,
+        authority_identity: &str,
+        authority_route: &Option<MultiAddr>,
+        expect_cached_credential: bool,
+    ) -> Result<NodeManagerTrustOptions> {
+        let identities_verification = IdentitiesVerification::new(
+            self.change_history_repository(),
+            SoftwareVaultForVerifyingSignatures::create(),
+        );
+
+        let authority_identity = hex::decode(authority_identity).map_err(|_e| {
+            Error::new(
+                Origin::Api,
+                Kind::NotFound,
+                "Invalid authority identity hex",
+            )
+        })?;
+        let authority_identifier = identities_verification
+            .import(None, &authority_identity)
+            .await?;
+
+        if let Some(authority_multiaddr) = authority_route {
+            if expect_cached_credential {
+                return Err(Error::new(
+                    Origin::Api,
+                    Kind::NotFound,
+                    "Authority address was provided but expect_cached_credential is true",
+                ));
+            }
+
+            let authority_route =
+                multiaddr_to_transport_route(authority_multiaddr).ok_or(Error::new(
+                    Origin::Api,
+                    Kind::NotFound,
+                    format!("Invalid authority route: {}", &authority_multiaddr),
+                ))?;
+            let info = RemoteCredentialRetrieverInfo::create_for_project_member(
+                authority_identifier.clone(),
+                authority_route,
+            );
+
+            let trust_options = NodeManagerTrustOptions::new(
+                NodeManagerCredentialRetrieverOptions::Remote {
+                    info,
+                    project_id: "unknown".to_string(),
+                },
+                NodeManagerCredentialRetrieverOptions::None,
+                Some(authority_identifier.clone()),
+                NodeManagerCredentialRetrieverOptions::None,
+            );
+
+            info!(
+                    "TrustOptions configured: Authority: {}. Credentials retrieved from Remote Authority: {}",
+                    authority_identifier, authority_multiaddr
+                );
+
+            return Ok(trust_options);
+        }
+
+        if expect_cached_credential {
+            let trust_options = NodeManagerTrustOptions::new(
+                NodeManagerCredentialRetrieverOptions::CacheOnly {
+                    issuer: authority_identifier.clone(),
+                    project_id: "unknown".to_string(),
+                },
+                NodeManagerCredentialRetrieverOptions::None,
+                Some(authority_identifier.clone()),
+                NodeManagerCredentialRetrieverOptions::None,
+            );
+
+            info!(
+                "TrustOptions configured: Authority: {}. Expect credentials in cache",
+                authority_identifier
+            );
+
+            return Ok(trust_options);
+        }
+
+        let trust_options = NodeManagerTrustOptions::new(
+            NodeManagerCredentialRetrieverOptions::None,
+            NodeManagerCredentialRetrieverOptions::None,
+            Some(authority_identifier.clone()),
+            NodeManagerCredentialRetrieverOptions::None,
+        );
+
+        info!(
+            "TrustOptions configured: Authority: {}. Only verifying credentials",
+            authority_identifier
+        );
+
+        Ok(trust_options)
+    }
+
+    async fn retrieve_trust_options_with_project(
+        &self,
+        project: Project,
+    ) -> Result<NodeManagerTrustOptions> {
+        let authority_identifier = project.authority_identifier()?;
+        let authority_multiaddr = project.authority_multiaddr()?;
+        let authority_route =
+            multiaddr_to_transport_route(authority_multiaddr).ok_or(Error::new(
+                Origin::Api,
+                Kind::NotFound,
+                format!("Invalid authority route: {}", &authority_multiaddr),
+            ))?;
+
+        let project_id = project.project_id().to_string();
+        let project_member_retriever = NodeManagerCredentialRetrieverOptions::Remote {
+            info: RemoteCredentialRetrieverInfo::create_for_project_member(
+                authority_identifier.clone(),
+                authority_route,
+            ),
+            project_id: project_id.clone(),
+        };
+
+        let controller_identifier = NodeManager::load_controller_identifier()?;
+        let controller_transport_route = NodeManager::controller_route().await?;
+
+        let project_admin_retriever = NodeManagerCredentialRetrieverOptions::Remote {
+            info: RemoteCredentialRetrieverInfo::create_for_project_admin(
+                controller_identifier.clone(),
+                controller_transport_route.clone(),
+                project_id.clone(),
+            ),
+            project_id: project_id.clone(),
+        };
+
+        let account_admin_retriever = NodeManagerCredentialRetrieverOptions::Remote {
+            info: RemoteCredentialRetrieverInfo::create_for_account_admin(
+                controller_identifier.clone(),
+                controller_transport_route,
+            ),
+            project_id: project_id.clone(), // FIXME CRED Should be account it
+        };
+
+        let trust_options = NodeManagerTrustOptions::new(
+            project_member_retriever,
+            project_admin_retriever,
+            Some(authority_identifier.clone()),
+            account_admin_retriever,
+        );
+
+        info!(
+            "TrustOptions configured: Authority: {}. Credentials retrieved from project: {}",
+            authority_identifier, authority_multiaddr
+        );
+        Ok(trust_options)
+    }
+
     /// Create [`NodeManagerTrustOptions`] depending on what trust information we possess
     ///  1. Either we explicitly know the Authority identity that we trust, and optionally route to its node to request
     ///     a new credential
@@ -35,82 +187,15 @@ impl CliState {
             ));
         }
 
-        if authority_route.is_some() && expect_cached_credential {
-            return Err(Error::new(
-                Origin::Api,
-                Kind::NotFound,
-                "Authority address was provided but expect_cached_credential is true",
-            ));
-        }
-
+        // We're using explicitly specified authority instead of a project
         if let Some(authority_identity) = authority_identity {
-            let identities_verification = IdentitiesVerification::new(
-                self.change_history_repository(),
-                SoftwareVaultForVerifyingSignatures::create(),
-            );
-
-            let authority_identity = hex::decode(authority_identity).map_err(|_e| {
-                Error::new(
-                    Origin::Api,
-                    Kind::NotFound,
-                    "Invalid authority identity hex",
-                )
-            })?;
-            let authority_identifier = identities_verification
-                .import(None, &authority_identity)
-                .await?;
-
-            let trust_options = if let Some(authority_multiaddr) = authority_route {
-                let authority_route =
-                    multiaddr_to_transport_route(authority_multiaddr).ok_or(Error::new(
-                        Origin::Api,
-                        Kind::NotFound,
-                        format!("Invalid authority route: {}", &authority_multiaddr),
-                    ))?;
-                let info = RemoteCredentialRetrieverInfo::new(
-                    authority_identifier.clone(),
+            return self
+                .retrieve_trust_options_explicit_project_authority(
+                    authority_identity,
                     authority_route,
-                    DefaultAddress::CREDENTIAL_ISSUER.into(),
-                );
-
-                let trust_options = NodeManagerTrustOptions::new(
-                    NodeManagerCredentialRetrieverOptions::Remote(info),
-                    Some(authority_identifier.clone()),
-                );
-
-                info!(
-                    "TrustOptions configured: Authority: {}. Credentials retrieved from Remote Authority: {}",
-                    authority_identifier, authority_multiaddr
-                );
-
-                trust_options
-            } else if expect_cached_credential {
-                let trust_options = NodeManagerTrustOptions::new(
-                    NodeManagerCredentialRetrieverOptions::CacheOnly(authority_identifier.clone()),
-                    Some(authority_identifier.clone()),
-                );
-
-                info!(
-                    "TrustOptions configured: Authority: {}. Expect credentials in cache",
-                    authority_identifier
-                );
-
-                trust_options
-            } else {
-                let trust_options = NodeManagerTrustOptions::new(
-                    NodeManagerCredentialRetrieverOptions::None,
-                    Some(authority_identifier.clone()),
-                );
-
-                info!(
-                    "TrustOptions configured: Authority: {}. Only verifying credentials",
-                    authority_identifier
-                );
-
-                trust_options
-            };
-
-            return Ok(trust_options);
+                    expect_cached_credential,
+                )
+                .await;
         }
 
         let project = match project_name {
@@ -124,34 +209,13 @@ impl CliState {
                 info!("TrustOptions configured: No Authority. No Credentials");
                 return Ok(NodeManagerTrustOptions::new(
                     NodeManagerCredentialRetrieverOptions::None,
+                    NodeManagerCredentialRetrieverOptions::None,
                     None,
+                    NodeManagerCredentialRetrieverOptions::None,
                 ));
             }
         };
 
-        let authority_identifier = project.authority_identifier()?;
-        let authority_multiaddr = project.authority_multiaddr()?;
-        let authority_route =
-            multiaddr_to_transport_route(authority_multiaddr).ok_or(Error::new(
-                Origin::Api,
-                Kind::NotFound,
-                format!("Invalid authority route: {}", &authority_multiaddr),
-            ))?;
-        let info = RemoteCredentialRetrieverInfo::new(
-            authority_identifier.clone(),
-            authority_route,
-            DefaultAddress::CREDENTIAL_ISSUER.into(),
-        );
-
-        let trust_options = NodeManagerTrustOptions::new(
-            NodeManagerCredentialRetrieverOptions::Remote(info),
-            Some(authority_identifier.clone()),
-        );
-
-        info!(
-            "TrustOptions configured: Authority: {}. Credentials retrieved from project: {}",
-            authority_identifier, authority_multiaddr
-        );
-        Ok(trust_options)
+        self.retrieve_trust_options_with_project(project).await
     }
 }

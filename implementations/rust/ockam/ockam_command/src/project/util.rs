@@ -223,14 +223,7 @@ async fn check_authority_node_accessible(
     retry_strategy: Take<FixedInterval>,
     spinner_option: Option<ProgressBar>,
 ) -> Result<Project> {
-    let authority_node = node
-        .create_authority_client(
-            &project.authority_identifier()?,
-            project.authority_multiaddr()?,
-            None,
-            None,
-        )
-        .await?;
+    let authority_node = node.create_authority_client(&project, None).await?;
 
     if let Some(spinner) = spinner_option.as_ref() {
         spinner.set_message("Establishing secure channel to project authority...");
